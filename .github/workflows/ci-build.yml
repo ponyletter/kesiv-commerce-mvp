@@ -1,0 +1,52 @@
+name: Build & Test Multi-Protocol CDK Station
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go 1.24
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache-dependency-path: cdk-station/backend/go.sum
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: cdk-station/frontend/package-lock.json
+
+      - name: Run Backend Unit Tests
+        working-directory: cdk-station/backend
+        run: go test -v ./internal/cardplatform/... ./internal/db/... -run . && go test -v ./internal/handler -run TestMultiprotocolFailoverFlow
+
+      - name: Build Backend Binary (linux/amd64)
+        working-directory: cdk-station/backend
+        run: |
+          mkdir -p ../../dist/cdk-station
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../../dist/cdk-station/cdk-recharge ./cmd/server
+
+      - name: Build Frontend Vue 3 SPA
+        working-directory: cdk-station/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          cp -r dist ../../dist/cdk-station/web
+
+      - name: Upload Release Bundle Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdk-station-linux-amd64
+          path: dist/cdk-station/
+          retention-days: 14

@@ -174,7 +174,13 @@ func Mount(rg *gin.RouterGroup) {
 			c.JSON(http.StatusOK, gin.H{
 				"code": 0,
 				"msg":  "ok",
-				"data": gin.H{"cdks": created, "list": created, "count": len(created)},
+				"data": gin.H{
+					"requested": len(created),
+					"issued":    created,
+					"cdks":      created,
+					"list":      created,
+					"count":     len(created),
+				},
 			})
 		})
 

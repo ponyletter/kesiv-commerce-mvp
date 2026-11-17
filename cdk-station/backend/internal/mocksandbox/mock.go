@@ -92,30 +92,83 @@ func Mount(rg *gin.RouterGroup) {
 		})
 
 		zovoOpen.GET("/gpt-direct/plans", func(c *gin.Context) {
+			prod := strings.ToLower(strings.TrimSpace(c.Query("product")))
+			if prod == "grok" {
+				c.JSON(http.StatusOK, gin.H{
+					"code": 0,
+					"msg":  "ok",
+					"data": gin.H{
+						"version": 20261118,
+						"plans": gin.H{
+							"grok_plus_monthly": gin.H{
+								"key": "grok_plus_monthly", "label": "Grok Plus 月付", "currency": "USD", "enabled": true, "serviceFeeUsdMinor": 100, "expectedAmountMinor": 800,
+							},
+							"grok_plus_yearly": gin.H{
+								"key": "grok_plus_yearly", "label": "Grok Plus 年付", "currency": "USD", "enabled": true, "serviceFeeUsdMinor": 100, "expectedAmountMinor": 8000,
+							},
+							"grok_premium_monthly": gin.H{
+								"key": "grok_premium_monthly", "label": "SuperGrok (Premium) 月付", "currency": "USD", "enabled": true, "serviceFeeUsdMinor": 100, "expectedAmountMinor": 3000,
+							},
+						},
+						"registry": []gin.H{
+							{"key": "plus_monthly", "label": "Grok Plus 月付 ($8)", "flow": "direct", "tier": 1, "sort_order": 1, "checkout_currency": "USD", "checkout_amount_minor": 800},
+							{"key": "premium_monthly", "label": "SuperGrok 月付 ($30)", "flow": "direct", "tier": 2, "sort_order": 2, "checkout_currency": "USD", "checkout_amount_minor": 3000},
+							{"key": "plus_yearly", "label": "Grok Plus 年付 ($80)", "flow": "direct", "tier": 3, "sort_order": 3, "checkout_currency": "USD", "checkout_amount_minor": 8000},
+						},
+						"payment_regions": []gin.H{{"country": "US", "currency": "USD"}},
+					},
+				})
+				return
+			}
+			if prod == "claude" {
+				c.JSON(http.StatusOK, gin.H{
+					"code": 0,
+					"msg":  "ok",
+					"data": gin.H{
+						"version": 20261118,
+						"plans": gin.H{
+							"claude_pro": gin.H{
+								"key": "claude_pro", "label": "Claude Pro 月付", "currency": "USD", "enabled": true, "serviceFeeUsdMinor": 100, "expectedAmountMinor": 2000,
+							},
+						},
+						"registry": []gin.H{
+							{"key": "pro", "label": "Claude Pro 月付 ($20)", "flow": "direct", "tier": 1, "sort_order": 1, "checkout_currency": "USD", "checkout_amount_minor": 2000},
+						},
+						"payment_regions": []gin.H{{"country": "US", "currency": "USD"}},
+					},
+				})
+				return
+			}
 			c.JSON(http.StatusOK, gin.H{
 				"code": 0,
 				"msg":  "ok",
 				"data": gin.H{
 					"version": 20261118,
 					"plans": gin.H{
+						"go": gin.H{
+							"key": "go", "label": "ChatGPT Go (1 Month)", "currency": "USD", "enabled": true, "serviceFeeUsdMinor": 50, "expectedAmountMinor": 500,
+						},
 						"plus": gin.H{
 							"key":                "plus",
 							"label":              "ChatGPT Plus (1 Month)",
 							"currency":           "USD",
 							"enabled":            true,
 							"serviceFeeUsdMinor": 100,
+							"expectedAmountMinor": 2000,
 						},
-						"pro20": gin.H{
-							"key":                "pro20",
-							"label":              "ChatGPT Pro 20X",
+						"pro_20x": gin.H{
+							"key":                "pro_20x",
+							"label":              "ChatGPT Pro 20X ($200)",
 							"currency":           "USD",
 							"enabled":            true,
 							"serviceFeeUsdMinor": 500,
+							"expectedAmountMinor": 20000,
 						},
 					},
 					"registry": []gin.H{
-						{"key": "plus", "label": "ChatGPT Plus 月付", "flow": "cdk", "tier": 1, "sort_order": 1},
-						{"key": "pro20", "label": "ChatGPT Pro 20X", "flow": "cdk", "tier": 2, "sort_order": 2},
+						{"key": "go", "label": "ChatGPT Go 月付", "flow": "cdk", "tier": 0, "sort_order": 1},
+						{"key": "plus", "label": "ChatGPT Plus 月付", "flow": "cdk", "tier": 1, "sort_order": 2},
+						{"key": "pro_20x", "label": "ChatGPT Pro 20X 月付", "flow": "cdk", "tier": 2, "sort_order": 3},
 					},
 					"payment_regions": []gin.H{
 						{"country": "PH", "currency": "PHP"},

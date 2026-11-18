@@ -227,6 +227,21 @@ func SumTodayOKXAutoTopupUSD() float64 {
 	return 0
 }
 
+// LookupStoredCDKMeta 从 cardplatform_cdk_codes 表反查已发码的套餐与地区（供内置模拟沙箱跨重启精确还原）。
+func LookupStoredCDKMeta(code string) (id int64, plan, country, status string, ok bool) {
+	if DB == nil || strings.TrimSpace(code) == "" {
+		return 0, "", "", "", false
+	}
+	err := DB.QueryRow(`
+		SELECT COALESCE(upstream_id, 0), COALESCE(plan, ''), COALESCE(payment_country, ''), COALESCE(status, '')
+		FROM cardplatform_cdk_codes WHERE code = ? LIMIT 1
+	`, strings.TrimSpace(code)).Scan(&id, &plan, &country, &status)
+	if err != nil {
+		return 0, "", "", "", false
+	}
+	return id, plan, country, status, true
+}
+
 func ListOKXTreasuryLogs(limit int) ([]OKXTreasuryLog, error) {
 	if DB == nil {
 		return nil, nil

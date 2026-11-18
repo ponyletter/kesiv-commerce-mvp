@@ -1,10 +1,11 @@
 // Package mocksandbox 内置零成本双上游沙箱模拟器（ZovoCard Sandbox + card.zzshu.pro），
-// 支持管理员一键验证「主通道正常发码兑换」与「ZovoCard 支付失败但卡内有钱 -> 自动切换 zzshu 自带卡直充容灾」。
+// 支持无外部沙箱依赖的完整浏览器端到端模拟（预览 -> 预检 preflight_token -> 兑换进度时间轴 -> 对账列表 -> 自动切 zzshu 容灾）。
 package mocksandbox
 
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
@@ -18,11 +19,14 @@ type mockCDK struct {
 	ID             int64  `json:"id"`
 	Code           string `json:"code"`
 	CodePrefix     string `json:"code_prefix"`
+	Product        string `json:"product"`
 	Plan           string `json:"plan"`
 	Status         string `json:"status"` // unused / reserved / consumed
 	PaymentCountry string `json:"payment_country"`
+	AccountEmail   string `json:"account_email"`
 	RedeemToken    string `json:"-"`
 	OrderStatus    string `json:"-"`
+	UpdatedAt      string `json:"updated_at"`
 }
 
 type mockZzshuOrder struct {
@@ -36,7 +40,7 @@ type mockZzshuOrder struct {
 
 var (
 	mu          sync.Mutex
-	nextID      int64 = 1001
+	nextID      int64 = 2001
 	cdks              = map[string]*mockCDK{}
 	tokToCode         = map[string]string{}
 	zzshuOrders       = map[string]*mockZzshuOrder{}
@@ -53,6 +57,76 @@ func simulateZovoFail() bool {
 	return strings.EqualFold(strings.TrimSpace(v), "true") || v == "1"
 }
 
+func inferProductFromPlan(plan string) string {
+	p := strings.ToLower(strings.TrimSpace(plan))
+	if strings.Contains(p, "grok") || p == "plus_monthly" || p == "plus_yearly" || p == "premium_monthly" {
+		return "grok"
+	}
+	if p == "pro" || strings.Contains(p, "claude") {
+		return "claude"
+	}
+	return "gpt"
+}
+
+// resolveOrHydrateCDK 优先查内存，若重启后内存为空则从 SQLite cardplatform_cdk_codes 精确恢复套餐与地区。
+func resolveOrHydrateCDK(code string) (*mockCDK, bool) {
+	code = strings.TrimSpace(code)
+	if item, ok := cdks[code]; ok {
+		return item, true
+	}
+	if id, plan, country, st, ok := db.LookupStoredCDKMeta(code); ok {
+		if id <= 0 {
+			id = nextID
+			nextID++
+		}
+		if plan == "" {
+			plan = "plus"
+		}
+		if country == "" {
+			country = "PH"
+		}
+		if st == "" {
+			st = "unused"
+		}
+		prefix := code
+		if len(prefix) > 14 {
+			prefix = prefix[:14]
+		}
+		item := &mockCDK{
+			ID:             id,
+			Code:           code,
+			CodePrefix:     prefix,
+			Product:        inferProductFromPlan(plan),
+			Plan:           plan,
+			Status:         st,
+			PaymentCountry: country,
+			UpdatedAt:      time.Now().UTC().Format(time.RFC3339),
+		}
+		cdks[code] = item
+		return item, true
+	}
+	if strings.HasPrefix(code, "ZOVO-SBX-") || strings.HasPrefix(code, "MOCK-") {
+		prefix := code
+		if len(prefix) > 14 {
+			prefix = prefix[:14]
+		}
+		item := &mockCDK{
+			ID:             nextID,
+			Code:           code,
+			CodePrefix:     prefix,
+			Product:        "gpt",
+			Plan:           "plus",
+			Status:         "unused",
+			PaymentCountry: "PH",
+			UpdatedAt:      time.Now().UTC().Format(time.RFC3339),
+		}
+		nextID++
+		cdks[code] = item
+		return item, true
+	}
+	return nil, false
+}
+
 // Mount 挂载 /api/v1/mock-sandbox 路由组。
 func Mount(rg *gin.RouterGroup) {
 	// ==================== 1. Mock ZovoCard OpenAPI ====================
@@ -63,8 +137,8 @@ func Mount(rg *gin.RouterGroup) {
 				"code": 0,
 				"msg":  "ok",
 				"data": gin.H{
-					"balance":                "120.00",
-					"spendable_balance":      "100.00",
+					"balance":                "520.00",
+					"spendable_balance":      "500.00",
 					"account_reserve_amount": "20.00",
 				},
 			})
@@ -85,7 +159,7 @@ func Mount(rg *gin.RouterGroup) {
 						"scene":                  "AI Subscription",
 						"enabled":                true,
 						"google_chatgpt_blocked": false,
-						"description":            "Mock 香港星链 Visa（放行 OpenAI / Claude / Grok）",
+						"description":            "模拟香港星链商业 Visa（放行 OpenAI / Grok / Claude）",
 					},
 				},
 			})
@@ -183,6 +257,7 @@ func Mount(rg *gin.RouterGroup) {
 
 		zovoOpen.POST("/gpt-direct/cdks", func(c *gin.Context) {
 			var body struct {
+				Product        string `json:"product"`
 				Plan           string `json:"plan"`
 				Count          int    `json:"count"`
 				PaymentCountry string `json:"payment_country"`
@@ -190,6 +265,9 @@ func Mount(rg *gin.RouterGroup) {
 			_ = c.ShouldBindJSON(&body)
 			if body.Plan == "" {
 				body.Plan = "plus"
+			}
+			if body.Product == "" {
+				body.Product = inferProductFromPlan(body.Plan)
 			}
 			if body.Count <= 0 {
 				body.Count = 1
@@ -208,9 +286,11 @@ func Mount(rg *gin.RouterGroup) {
 					ID:             id,
 					Code:           code,
 					CodePrefix:     prefix,
+					Product:        body.Product,
 					Plan:           body.Plan,
 					Status:         "unused",
 					PaymentCountry: body.PaymentCountry,
+					UpdatedAt:      time.Now().UTC().Format(time.RFC3339),
 				}
 				cdks[code] = item
 				created = append(created, gin.H{
@@ -260,14 +340,33 @@ func Mount(rg *gin.RouterGroup) {
 		})
 
 		zovoOpen.GET("/gpt-direct/cdk-orders", func(c *gin.Context) {
+			mu.Lock()
+			orders := make([]gin.H, 0)
+			for _, it := range cdks {
+				if it.OrderStatus != "" {
+					orders = append(orders, gin.H{
+						"id":                 it.ID,
+						"cdk_id":             it.ID,
+						"code_prefix":        it.CodePrefix,
+						"plan":               it.Plan,
+						"status":             it.OrderStatus,
+						"cdk_status":         it.Status,
+						"account_email":      nonEmpty(it.AccountEmail, "mock-buyer@kesiv.com"),
+						"card_last_four":     "8899",
+						"payment_country":    it.PaymentCountry,
+						"service_fee_status": "charged",
+						"created_at":         it.UpdatedAt,
+					})
+				}
+			}
+			mu.Unlock()
 			c.JSON(http.StatusOK, gin.H{
 				"code": 0,
 				"msg":  "ok",
-				"data": gin.H{"list": []any{}, "total": 0},
+				"data": gin.H{"list": orders, "total": len(orders)},
 			})
 		})
 
-		// 名下有钱的虚拟卡列表（用于演示 ZovoCard 直充失败后提取卡要素切走 zzshu）
 		zovoOpen.GET("/cards", func(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{
 				"code": 0,
@@ -279,27 +378,43 @@ func Mount(rg *gin.RouterGroup) {
 							"card_number":            "493728******8899",
 							"last4":                  "8899",
 							"status":                 "ACTIVE",
-							"balance":                35.50,
+							"balance":                235.50,
+							"issuer":                 "four",
+							"google_chatgpt_blocked": false,
+						},
+						{
+							"id":                     "8802",
+							"card_number":            "493728******6621",
+							"last4":                  "6621",
+							"status":                 "ACTIVE",
+							"balance":                35.00,
 							"issuer":                 "four",
 							"google_chatgpt_blocked": false,
 						},
 					},
-					"total": 1,
+					"total": 2,
 				},
 			})
 		})
 
 		zovoOpen.GET("/cards/:id", func(c *gin.Context) {
+			id := c.Param("id")
+			last4 := "8899"
+			bal := 235.50
+			if id == "8802" {
+				last4 = "6621"
+				bal = 35.00
+			}
 			c.JSON(http.StatusOK, gin.H{
 				"code": 0,
 				"msg":  "ok",
 				"data": gin.H{
-					"id":          c.Param("id"),
-					"card_number": "4937280012348899",
+					"id":          id,
+					"card_number": "493728001234" + last4,
 					"expire":      "12/29",
 					"cvv":         "852",
 					"status":      "ACTIVE",
-					"balance":     35.50,
+					"balance":     bal,
 					"issuer":      "four",
 				},
 			})
@@ -316,23 +431,15 @@ func Mount(rg *gin.RouterGroup) {
 			_ = c.ShouldBindJSON(&body)
 			code := strings.TrimSpace(body.Code)
 			mu.Lock()
-			item, ok := cdks[code]
-			if !ok && strings.HasPrefix(code, "ZOVO-SBX-") {
-				item = &mockCDK{
-					ID:             nextID,
-					Code:           code,
-					CodePrefix:     code[:14],
-					Plan:           "plus",
-					Status:         "unused",
-					PaymentCountry: "PH",
-				}
-				nextID++
-				cdks[code] = item
-				ok = true
-			}
+			item, ok := resolveOrHydrateCDK(code)
 			if !ok {
 				mu.Unlock()
-				c.JSON(http.StatusNotFound, gin.H{"error": "CDK 不存在", "error_code": "code_not_found"})
+				c.JSON(http.StatusNotFound, gin.H{"error": "模拟环境中未找到该 CDK（请使用 ZOVO-SBX-... 格式卡密）", "error_code": "code_not_found"})
+				return
+			}
+			if item.Status == "consumed" {
+				mu.Unlock()
+				c.JSON(http.StatusConflict, gin.H{"error": "该 CDK 已兑换使用", "error_code": "code_consumed"})
 				return
 			}
 			if item.RedeemToken == "" {
@@ -341,6 +448,7 @@ func Mount(rg *gin.RouterGroup) {
 			}
 			tok := item.RedeemToken
 			plan := item.Plan
+			prod := nonEmpty(item.Product, inferProductFromPlan(plan))
 			region := item.PaymentCountry
 			st := item.Status
 			mu.Unlock()
@@ -348,10 +456,11 @@ func Mount(rg *gin.RouterGroup) {
 			c.JSON(http.StatusOK, gin.H{
 				"code":             code,
 				"plan":             plan,
-				"product":          "gpt",
+				"product":          prod,
 				"status":           st,
 				"payment_country":  region,
 				"redemption_token": tok,
+				"message":          "模拟卡密有效，请点击下一步填写账号凭证",
 			})
 		})
 
@@ -359,13 +468,59 @@ func Mount(rg *gin.RouterGroup) {
 			var body map[string]any
 			_ = c.ShouldBindJSON(&body)
 			tok, _ := body["redemption_token"].(string)
+			codeStr, _ := body["code"].(string)
+
+			email := "sim-buyer@kesiv.com"
+			if cred, ok := body["credential"].(map[string]any); ok {
+				if em, _ := cred["email"].(string); strings.TrimSpace(em) != "" {
+					email = strings.TrimSpace(em)
+				} else if sessStr, _ := cred["session"].(string); strings.HasPrefix(strings.TrimSpace(sessStr), "{") {
+					var sessObj map[string]any
+					if json.Unmarshal([]byte(sessStr), &sessObj) == nil {
+						if u, ok := sessObj["user"].(map[string]any); ok {
+							if uem, _ := u["email"].(string); uem != "" {
+								email = uem
+							}
+						}
+					}
+				}
+			}
+
+			mu.Lock()
+			if codeStr == "" {
+				codeStr = tokToCode[tok]
+			}
+			plan := "plus"
+			region := "PH"
+			if item, ok := resolveOrHydrateCDK(codeStr); ok {
+				item.AccountEmail = email
+				plan = item.Plan
+				region = item.PaymentCountry
+			}
+			mu.Unlock()
+
+			pftok := "pftok_mock_" + strings.ToLower(randHex(8))
 			c.JSON(http.StatusOK, gin.H{
-				"ok":               true,
-				"eligible":         true,
+				"code":             0,
+				"msg":              "ok",
 				"redemption_token": tok,
-				"plan":             "plus",
-				"payment_country":  "PH",
-				"message":          "沙箱预检通过：账号可正常订阅",
+				"preflight_token":  pftok,
+				"data": gin.H{
+					"ok":                        true,
+					"eligible":                  true,
+					"email":                     email,
+					"account_email":             email,
+					"currentPlan":               "free",
+					"current_plan":              "free",
+					"plan":                      plan,
+					"payment_country":           region,
+					"subscription_has_active":   false,
+					"subscription_will_renew":   false,
+					"preflight_token":           pftok,
+					"redemption_token":          tok,
+					"blocking_reason":           "",
+					"message":                   "模拟预检通过：当前账号为免费版，满足直充条件",
+				},
 			})
 		})
 
@@ -375,7 +530,8 @@ func Mount(rg *gin.RouterGroup) {
 			tok, _ := body["redemption_token"].(string)
 			mu.Lock()
 			code := tokToCode[tok]
-			if item, ok := cdks[code]; ok {
+			if item, ok := resolveOrHydrateCDK(code); ok {
+				item.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 				if simulateZovoFail() {
 					item.OrderStatus = "declined"
 					item.Status = "unused"
@@ -396,30 +552,60 @@ func Mount(rg *gin.RouterGroup) {
 			tok := strings.TrimSpace(c.Query("token"))
 			mu.Lock()
 			code := tokToCode[tok]
-			item := cdks[code]
+			item, ok := resolveOrHydrateCDK(code)
 			mu.Unlock()
-			if item == nil {
+			if !ok || item == nil {
 				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 				return
 			}
+			now := time.Now().UTC().Format(time.RFC3339)
+			email := nonEmpty(item.AccountEmail, "sim-buyer@kesiv.com")
+
 			if simulateZovoFail() || item.OrderStatus == "declined" {
+				msg := "ZovoCard 模拟主通道网关拒付（卡片尾号 8899 仍有 $35.50 余额）"
 				c.JSON(http.StatusOK, gin.H{
 					"status":           "declined",
+					"stage":            "payment",
 					"error_code":       "zovo_gateway_declined",
-					"message":          "ZovoCard 直充网关支付失败（卡片 8899 内仍有 $35.50 可用余额）",
+					"message":          msg,
 					"redemption_token": tok,
 					"plan":             item.Plan,
 					"payment_country":  item.PaymentCountry,
+					"account_email":    email,
+					"order": gin.H{
+						"status":         "declined",
+						"stage":          "payment",
+						"message":        msg,
+						"account_email":  email,
+						"card_last_four": "8899",
+					},
 				})
 				return
 			}
+
+			msg := "模拟直充成功！订阅已激活并自动关闭到期续费"
 			c.JSON(http.StatusOK, gin.H{
 				"status":           "completed",
-				"provider":         "zovocard",
+				"stage":            "completed",
+				"provider":         "zovocard_mock",
 				"redemption_token": tok,
 				"plan":             item.Plan,
 				"payment_country":  item.PaymentCountry,
-				"message":          "ZovoCard 沙箱直充成功",
+				"account_email":    email,
+				"message":          msg,
+				"order": gin.H{
+					"status":         "completed",
+					"stage":          "completed",
+					"message":        msg,
+					"account_email":  email,
+					"card_last_four": "8899",
+				},
+				"events": []gin.H{
+					{"step": "queued", "category": "info", "message": "模拟订单已入队受理", "created_at": now},
+					{"step": "checkout", "category": "info", "message": "已分配模拟星链 Visa 虚拟卡 (尾号 8899)", "created_at": now},
+					{"step": "payment", "category": "success", "message": "Stripe 账单扣款成功", "created_at": now},
+					{"step": "completed", "category": "success", "message": msg, "created_at": now},
+				},
 			})
 		})
 	}
@@ -470,7 +656,7 @@ func Mount(rg *gin.RouterGroup) {
 				c.JSON(http.StatusBadRequest, gin.H{"code": 40002, "message": "必须使用 orderType=direct 并提交完整银行卡要素"})
 				return
 			}
-			email := "sandbox-buyer@kesiv.com"
+			email := "sim-buyer@kesiv.com"
 			if u, ok := body.Token["user"].(map[string]any); ok {
 				if em, _ := u["email"].(string); em != "" {
 					email = em
@@ -534,4 +720,11 @@ func Mount(rg *gin.RouterGroup) {
 			})
 		})
 	}
+}
+
+func nonEmpty(a, b string) string {
+	if strings.TrimSpace(a) != "" {
+		return a
+	}
+	return b
 }

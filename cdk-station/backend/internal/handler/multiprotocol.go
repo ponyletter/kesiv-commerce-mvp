@@ -329,8 +329,14 @@ func pollExistingFailover(ctx context.Context, fo *db.FailoverOrder) (int, map[s
 		msg = "主备双通道均未能完成支付: " + fo.FailureReason
 	}
 
+	acctEmail := nonEmptyStr(stData.Email, fo.AccountEmail)
+	stage := "payment"
+	if pubStatus == "completed" {
+		stage = "completed"
+	}
 	out := map[string]any{
 		"status":             pubStatus,
+		"stage":              stage,
 		"provider":           "card.zzshu.pro",
 		"failover_triggered": true,
 		"zzshu_order_no":     fo.ZzshuOrderNo,
@@ -340,8 +346,20 @@ func pollExistingFailover(ctx context.Context, fo *db.FailoverOrder) (int, map[s
 		"redemption_token":   fo.RedemptionToken,
 		"plan":               fo.PlanType,
 		"payment_country":    fo.Region,
-		"account_email":      nonEmptyStr(stData.Email, fo.AccountEmail),
+		"account_email":      acctEmail,
 		"message":            msg,
+		"order": map[string]any{
+			"status":         pubStatus,
+			"stage":          stage,
+			"message":        msg,
+			"account_email":  acctEmail,
+			"card_last_four": fo.CardLast4,
+		},
+		"events": []map[string]any{
+			{"step": "queued", "category": "warning", "message": "ZovoCard 主通道拒付，自动触发协议多元化容灾", "created_at": fo.CreatedAt},
+			{"step": "checkout", "category": "info", "message": fmt.Sprintf("已提取余额充足的卡片尾号 %s ($%.2f) 转发 card.zzshu.pro (orderType=direct)", fo.CardLast4, fo.CardBalanceUSD), "created_at": fo.CreatedAt},
+			{"step": stage, "category": map[bool]string{true: "success", false: "info"}[pubStatus == "completed"], "message": msg, "created_at": fo.UpdatedAt},
+		},
 	}
 	if len(stData.Verification) > 0 && string(stData.Verification) != "null" {
 		var ver any

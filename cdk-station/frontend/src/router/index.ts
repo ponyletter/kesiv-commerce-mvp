@@ -11,6 +11,7 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../views/HomeView.vue'),
   },
   // 旧登录路径 → 隐蔽入口
+  { path: '/login', redirect: `${OPS_BASE}/login` },
   { path: '/auth/login', redirect: `${OPS_BASE}/login` },
   { path: '/admin', redirect: OPS_BASE },
   { path: '/admin/:pathMatch(.*)*', redirect: (to) => `${OPS_BASE}/${to.params.pathMatch || ''}` },

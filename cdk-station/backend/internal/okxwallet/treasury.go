@@ -65,11 +65,13 @@ func LoadConfig() Config {
 }
 
 type CLIProbeResult struct {
-	Installed bool   `json:"installed"`
-	Binary    string `json:"binary"`
-	LoggedIn  bool   `json:"logged_in"`
-	RawOutput string `json:"raw_output"`
-	TodayUsed float64 `json:"today_used_usd"`
+	Installed   bool    `json:"installed"`
+	Binary      string  `json:"binary"`
+	LoggedIn    bool    `json:"logged_in"`
+	Email       string  `json:"email,omitempty"`
+	AccountName string  `json:"account_name,omitempty"`
+	RawOutput   string  `json:"raw_output"`
+	TodayUsed   float64 `json:"today_used_usd"`
 }
 
 func ProbeCLI(ctx context.Context) CLIProbeResult {
@@ -87,8 +89,20 @@ func ProbeCLI(ctx context.Context) CLIProbeResult {
 	out, err := exec.CommandContext(cctx, bin, "wallet", "status").CombinedOutput()
 	txt := strings.TrimSpace(string(out))
 	res.RawOutput = txt
-	lower := strings.ToLower(txt)
-	if err == nil && !strings.Contains(lower, "not logged") && !strings.Contains(lower, "login") {
+
+	var parsed struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			LoggedIn           bool   `json:"loggedIn"`
+			Email              string `json:"email"`
+			CurrentAccountName string `json:"currentAccountName"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(out, &parsed) == nil && parsed.OK {
+		res.LoggedIn = parsed.Data.LoggedIn
+		res.Email = parsed.Data.Email
+		res.AccountName = parsed.Data.CurrentAccountName
+	} else if err == nil && !strings.Contains(strings.ToLower(txt), "not logged") {
 		res.LoggedIn = true
 	}
 	return res
